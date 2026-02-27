@@ -2,19 +2,21 @@ import requests
 import json
 
 def fetch_via_subgraph():
-    # Polymarket 在 Polygon 上的官方子图地址
-    SUBGRAPH_URL = "https://api.thegraph.com"
+    # 使用 The Graph 的去中心化或公共节点，绕过主站防火墙
+    SUBGRAPH_URL = "https://gateway.thegraph.com/api/subgraphs/id/81Dm16JjuFSrqz813HysXoUPvzTwE7fsfPk2RTf66nyC"
     
-    # 想要查询的城市关键字
     cities = ["NYC", "Chicago", "Dallas", "Miami", "Seattle", "Atlanta"]
+    # 2026年2月27日
     target_date = "February 27, 2026"
     
-    # GraphQL 查询语句：寻找包含城市名和日期的活跃市场
-    query_template = """
-    {
-      conditions(where: {question_contains: "%s", question_contains_nocase: "%s", resolved: false}) {
+    # GraphQL 查询语句：搜索包含城市名和日期的未结算条件
+    query = """
+    query GetWeatherMarkets($searchTerm: String!) {
+      conditions(where: {
+        question_contains: $searchTerm,
+        resolved: False
+      }, first: 5) {
         question
-        outcomeSlotCount
         fpmm {
           id
           currentOdds
@@ -25,17 +27,17 @@ def fetch_via_subgraph():
     """
 
     results = []
+    print(f"--- 正在通过 Subgraph 获取 {target_date} 数据 ---")
 
     for city in cities:
-        # 构建搜索词，例如 "Highest temperature in NYC on February 27"
-        search_term = f"Highest temperature in {city} on {target_date}"
+        search_str = f"Highest temperature in {city} on {target_date}"
+        variables = {"searchTerm": search_str}
         
         try:
-            # 发送 GraphQL 请求
-            response = requests.post(SUBGRAPH_URL, json={'query': query_template % (city, target_date)})
+            response = requests.post(SUBGRAPH_URL, json={'query': query, 'variables': variables}, timeout=30)
             
             if response.status_code != 200:
-                results.append({"city": city, "error": f"Subgraph Error {response.status_code}"})
+                results.append({"city": city, "error": f"HTTP {response.status_code}"})
                 continue
                 
             data = response.json().get('data', {}).get('conditions', [])
@@ -44,26 +46,34 @@ def fetch_via_subgraph():
                 results.append({"city": city, "error": "No matching market found on-chain"})
                 continue
 
-            # 取匹配度最高的一个（通常是第一个）
+            # 获取第一个匹配结果
             market = data[0]
-            outcomes = market['fpmm']['outcomes']
-            odds = market['fpmm']['currentOdds'] # 这是一个数组，对应每个桶的概率
+            fpmm = market.get('fpmm')
+            if not fpmm:
+                results.append({"city": city, "error": "Market data (FPMM) missing"})
+                continue
+                
+            outcomes = fpmm['outcomes'] # 温度桶标签
+            odds = fpmm['currentOdds'] # 对应概率 (0-1)
             
             buckets = []
             for i, label in enumerate(outcomes):
-                # 这里的 odds 是从 0-1 的浮点数
                 prob = float(odds[i]) * 100
                 buckets.append({"range": label, "prob": f"{prob:.1f}%"})
+            
+            # 按概率从高到低排序
+            buckets.sort(key=lambda x: float(x['prob'].replace('%','')), reverse=True)
             
             results.append({
                 "city": city,
                 "question": market['question'],
-                "data": sorted(buckets, key=lambda x: float(x['prob'].replace('%','')), reverse=True)
+                "predictions": buckets[:3]
             })
 
         except Exception as e:
             results.append({"city": city, "error": str(e)})
 
+    # 输出格式化结果
     print(json.dumps(results, indent=2, ensure_ascii=False))
 
 if __name__ == "__main__":
